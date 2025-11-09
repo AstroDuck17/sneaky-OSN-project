@@ -1,0 +1,2 @@
+[2025-11-01T10:19:53.879Z] WRITE_BEGIN user=alice file=doc.txt sentence=0
+[2025-11-01T10:19:54.114Z] WRITE_COMMIT user=alice file=doc.txt words=0 chars=0

@@ -1,0 +1,38 @@
+[2025-11-01T10:12:13.351Z] Name server listening on 5000
+[2025-11-01T10:12:13.670Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:12:14.943Z] server 0 disconnected
+[2025-11-01T10:12:34.972Z] Name server listening on 5000
+[2025-11-01T10:12:42.847Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:15:32.253Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:15:32.254Z] server 0 disconnected
+[2025-11-01T10:16:03.729Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:16:03.736Z] server 0 disconnected
+[2025-11-01T10:16:23.910Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:16:23.996Z] server 0 disconnected
+[2025-11-01T10:16:51.843Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:16:51.845Z] server 0 disconnected
+[2025-11-01T10:17:15.729Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:17:15.729Z] server 0 disconnected
+[2025-11-01T10:18:01.615Z] Name server listening on 5000
+[2025-11-01T10:18:01.824Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:18:02.707Z] server 0 disconnected
+[2025-11-01T10:19:34.426Z] Name server listening on 5000
+[2025-11-01T10:19:41.172Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:21:10.878Z] Name server listening on 5000
+[2025-11-01T10:21:11.083Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:21:12.119Z] server 0 disconnected
+[2025-11-01T10:21:40.927Z] Name server listening on 5000
+[2025-11-01T10:21:50.716Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:22:01.897Z] server 0 disconnected
+[2025-11-01T10:25:29.308Z] Name server listening on 5000
+[2025-11-01T10:25:29.515Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:25:30.583Z] UNDO failure response: {"type":"SS_FILE_UPDATE","file":"doc.txt","owner":"alice","words":0,"chars":0,"modified":1761992730,"lastAccess":1761992730,"lastAccessUser":"alice"}
+[2025-11-01T10:25:30.583Z] server 0 disconnected
+[2025-11-01T10:27:03.313Z] Name server listening on 5000
+[2025-11-01T10:27:03.505Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:27:04.835Z] server 0 disconnected
+[2025-11-01T10:42:45.686Z] Name server listening on 5000
+[2025-11-01T10:42:45.953Z] registered server ss1 (127.0.0.1:0 data 6000)
+[2025-11-01T10:42:47.181Z] server 0 disconnected
+[2025-11-01T10:48:13.618Z] Name server listening on 5000
+[2025-11-01T10:48:13.840Z] registered server ss1 (127.0.0.1:0 data 6000)
