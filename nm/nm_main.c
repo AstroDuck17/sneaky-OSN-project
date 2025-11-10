@@ -125,6 +125,32 @@ static int send_error_response(int fd, error_code_t code, const char *message) {
     return net_send_json(fd, buf);
 }
 
+static int parse_status(const char *response,
+                        char *status_buf,
+                        size_t status_len,
+                        char *msg_buf,
+                        size_t msg_len) {
+    if (json_get_string(response, "status", status_buf, status_len) < 0) {
+        return -1;
+    }
+    if (msg_buf && msg_len > 0) {
+        if (json_get_string(response, "message", msg_buf, msg_len) < 0) {
+            msg_buf[0] = '\0';
+        }
+    }
+    return 0;
+}
+
+static struct storage_server *select_storage_server(struct nm_context *ctx,
+                                                   struct file_entry *file,
+                                                   int *server_index_out);
+static struct storage_server *select_storage_server_with_ticket(struct nm_context *ctx,
+                                                                struct file_entry *file,
+                                                                const char *user,
+                                                                const char *op,
+                                                                int *server_index_out,
+                                                                char *token_out);
+
 static void update_max_fd(struct nm_context *ctx) {
     ctx->max_fd = ctx->listen_fd;
     for (int i = 0; i < MAX_PEERS; ++i) {

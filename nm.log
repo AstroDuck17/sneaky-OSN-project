@@ -53,3 +53,14 @@
 [2025-11-09T13:29:45.212Z] Name server listening on 5000
 [2025-11-10T03:36:37.930Z] Name server listening on 5000
 [2025-11-10T03:37:06.210Z] registered server ssA (127.0.0.1:0 data 6001)
+[2025-11-10T03:43:17.552Z] Name server listening on 5000
+[2025-11-10T03:43:28.117Z] registered server ssC (127.0.0.1:0 data 6002)
+[2025-11-10T03:44:02.636Z] server 2 disconnected
+[2025-11-10T03:44:19.515Z] registered server ssC (127.0.0.1:0 data 6002)
+[2025-11-10T03:54:46.733Z] Name server listening on 5000
+[2025-11-10T03:54:54.046Z] registered server ssC (127.0.0.1:0 data 6002)
+[2025-11-10T03:55:04.074Z] Name server listening on 5000
+[2025-11-10T04:07:47.562Z] registered server ssD (127.0.0.1:0 data 6003)
+[2025-11-10T04:07:59.491Z] server 3 disconnected
+[2025-11-10T04:08:05.636Z] registered server ssD (127.0.0.1:0 data 6003)
+[2025-11-10T04:21:02.870Z] server 3 disconnected

@@ -49,3 +49,26 @@
 [2025-11-01T10:48:15.526Z] EXEC user=alice file=script.sh
 [2025-11-09T13:24:43.231Z] CREATE user=alice file=H.txt
 [2025-11-09T13:28:46.331Z] CREATE user=alice file=h.txt
+[2025-11-10T03:44:02.546Z] CREATE user=alice file=ab.txt
+[2025-11-10T04:07:59.399Z] CREATE user=alice file=abc.txt
+[2025-11-10T04:08:21.837Z] LIST user=alice
+[2025-11-10T04:08:24.362Z] VIEW user=alice flags=
+[2025-11-10T04:08:37.127Z] VIEW user=alice flags=l
+[2025-11-10T04:09:41.276Z] WRITE user=alice file=abc.txt
+[2025-11-10T04:10:09.011Z] READ user=alice file=abc.txt
+[2025-11-10T04:16:24.956Z] LIST user=alice
+[2025-11-10T04:16:25.533Z] VIEW user=alice flags=
+[2025-11-10T04:16:50.221Z] VIEW user=bob flags=
+[2025-11-10T04:16:52.985Z] VIEW user=bob flags=a
+[2025-11-10T04:17:25.149Z] WRITE user=alice file=abc.txt
+[2025-11-10T04:17:50.630Z] READ user=alice file=abc.txt
+[2025-11-10T04:18:03.264Z] WRITE user=alice file=abc.txt
+[2025-11-10T04:18:19.093Z] READ user=alice file=abc.txt
+[2025-11-10T04:18:58.122Z] STREAM user=alice file=abc.txt
+[2025-11-10T04:19:44.076Z] UNDO user=alice file=abc.txt
+[2025-11-10T04:19:48.605Z] STREAM user=alice file=abc.txt
+[2025-11-10T04:19:58.512Z] INFO user=alice file=abc.txt
+[2025-11-10T04:20:36.853Z] DELETE user=alice file=abc.txt
+[2025-11-10T04:20:43.155Z] VIEW user=alice flags=
+[2025-11-10T04:20:45.447Z] VIEW user=alice flags=al
+[2025-11-10T04:21:02.774Z] CREATE user=alice file=abbb.txt

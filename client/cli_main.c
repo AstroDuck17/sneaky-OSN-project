@@ -414,8 +414,6 @@ static int ss_write_session(const char *host,
     return commit_success ? 0 : -1;
 }
 
-}
-
 static int handle_view(int nm_fd, const char *flags) {
     char *response = NULL;
     if (nm_call(nm_fd, &response, "VIEW", flags && flags[0] ? "\"flags\":\"%s\"" : NULL, flags) < 0) {
@@ -975,6 +973,7 @@ int main(int argc, char **argv) {
     printf("Connected as %s. Type 'help' for commands.\n", g_username);
 
     char input[INPUT_BUF];
+    char *save = NULL;
     while (1) {
         printf("docs> ");
         fflush(stdout);
@@ -986,6 +985,7 @@ int main(int argc, char **argv) {
         if (input[0] == '\0') {
             continue;
         }
+        save = NULL;
         char *cmd = strtok_r(input, " ", &save);
         if (!cmd) {
             continue;

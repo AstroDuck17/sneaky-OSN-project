@@ -474,7 +474,6 @@ int nm_state_load(struct nm_state *state) {
                 file.ss_index = atoi(tokens[idx++]);
                 file.backup_index = -1;
             }
-            size_t acl_count = 0;
             long created = 0;
             long modified = 0;
             long last_access = 0;
@@ -485,7 +484,7 @@ int nm_state_load(struct nm_state *state) {
                 modified = atol(tokens[idx++]);
                 last_access = atol(tokens[idx++]);
                 strncpy(file.last_access_user, tokens[idx++], sizeof(file.last_access_user) - 1);
-                acl_count = (size_t)strtoull(tokens[idx++], NULL, 10);
+                (void)strtoull(tokens[idx++], NULL, 10);
             } else {
                 current_file = NULL;
                 continue;

@@ -95,6 +95,7 @@ static struct auth_ticket *ticket_table_take(struct ticket_table *table,
                                              const char *file,
                                              const char *op);
 static int handle_nm_sync(struct ss_context *ctx, const char *json);
+static int handle_nm_ticket_command(struct ss_context *ctx, const char *json);
 static void sleep_ms(int ms);
 static int ensure_directory(const char *path) {
     struct stat st;
@@ -918,6 +919,25 @@ static int handle_nm_sync(struct ss_context *ctx, const char *json) {
     return send_ok(ctx->nm_fd, "\"op\":\"SYNC\"");
 }
 
+static int handle_nm_ticket_command(struct ss_context *ctx, const char *json) {
+    char token[MAX_TOKEN_LEN];
+    char file_name[SS_NAME_MAX];
+    char user[SS_USER_MAX];
+    char op[16];
+    int expiry = 0;
+    if (json_get_string(json, "token", token, sizeof(token)) < 0 ||
+        json_get_string(json, "file", file_name, sizeof(file_name)) < 0 ||
+        json_get_string(json, "user", user, sizeof(user)) < 0 ||
+        json_get_string(json, "op", op, sizeof(op)) < 0 ||
+        json_get_int(json, "expiry", &expiry) < 0) {
+        return send_error_response(ctx->nm_fd, ERR_BADREQ, "invalid ticket");
+    }
+    if (ticket_table_add(&ctx->tickets, token, file_name, user, op, (time_t)expiry) < 0) {
+        return send_error_response(ctx->nm_fd, ERR_INTERNAL, "ticket failed");
+    }
+    return send_ok(ctx->nm_fd, "\"op\":\"TICKET\"");
+}
+
 static int process_nm_command(struct ss_context *ctx) {
     char *json = NULL;
     if (net_recv_json(ctx->nm_fd, &json) < 0) {
@@ -953,21 +973,7 @@ static int process_nm_command(struct ss_context *ctx) {
             send_ok(ctx->nm_fd, "\"op\":\"DELETE\"");
         }
     } else if (strcmp(type, "NM_TICKET") == 0) {
-        char token[MAX_TOKEN_LEN];
-        char file_name[SS_NAME_MAX];
-        char user[SS_USER_MAX];
-        char op[16];
-        int expiry = 0;
-        if (json_get_string(json, "token", token, sizeof(token)) < 0 ||
-            json_get_string(json, "file", file_name, sizeof(file_name)) < 0 ||
-            json_get_string(json, "user", user, sizeof(user)) < 0 ||
-            json_get_string(json, "op", op, sizeof(op)) < 0 ||
-            json_get_int(json, "expiry", &expiry) < 0) {
-            send_error_response(ctx->nm_fd, ERR_BADREQ, "invalid ticket");
-        } else {
-            ticket_table_add(&ctx->tickets, token, file_name, user, op, (time_t)expiry);
-            send_ok(ctx->nm_fd, "\"op\":\"TICKET\"");
-        }
+        handle_nm_ticket_command(ctx, json);
     } else if (strcmp(type, "NM_UNDO") == 0) {
         char file_name[SS_NAME_MAX];
         char user[SS_USER_MAX];
@@ -1132,14 +1138,34 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
     char *register_resp = NULL;
-    if (net_recv_json(ctx.nm_fd, &register_resp) < 0) {
-        fprintf(stderr, "Failed to receive register acknowledgement\n");
-        exit_code = 1;
-        goto cleanup;
-    }
     char status[16];
-    if (json_get_string(register_resp, "status", status, sizeof(status)) < 0 ||
-        strcmp(status, "OK") != 0) {
+    while (1) {
+        if (net_recv_json(ctx.nm_fd, &register_resp) < 0) {
+            fprintf(stderr, "Failed to receive register acknowledgement\n");
+            exit_code = 1;
+            goto cleanup;
+        }
+        if (json_get_string(register_resp, "status", status, sizeof(status)) == 0) {
+            break;
+        }
+        char type[64];
+        if (json_get_string(register_resp, "type", type, sizeof(type)) == 0 &&
+            strcmp(type, "NM_TICKET") == 0) {
+            if (handle_nm_ticket_command(&ctx, register_resp) < 0) {
+                fprintf(stderr, "Failed to process ticket during register: %s\n", register_resp);
+                free(register_resp);
+                exit_code = 1;
+                goto cleanup;
+            }
+            free(register_resp);
+            register_resp = NULL;
+            continue;
+        }
+        fprintf(stderr, "Unexpected NM message during register: %s\n", register_resp);
+        free(register_resp);
+        register_resp = NULL;
+    }
+    if (strcmp(status, "OK") != 0) {
         fprintf(stderr, "Register rejected by NM: %s\n", register_resp);
         free(register_resp);
         exit_code = 1;
