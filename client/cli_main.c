@@ -7,8 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #include "common/json_util.h"
 #include "common/net_proto.h"
@@ -109,60 +111,6 @@ static int nm_call(int nm_fd, char **response_out, const char *type, const char 
         }
     }
     return send_request(nm_fd, payload, response_out);
-}
-
-static size_t count_words(const char *text) {
-    size_t count = 0;
-    int in_word = 0;
-    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
-        if (*p <= ' ') {
-            in_word = 0;
-        } else if (!in_word) {
-            in_word = 1;
-            count++;
-        }
-    }
-    return count;
-}
-
-static char *collect_sentence(void) {
-    printf("Enter new sentence (blank line to clear). Finish with a single '.' on its own line.\n");
-    size_t cap = 512;
-    size_t len = 0;
-    char *buf = malloc(cap);
-    if (!buf) {
-        return NULL;
-    }
-    buf[0] = '\0';
-    char line[256];
-    while (fgets(line, sizeof(line), stdin)) {
-        if (strcmp(line, "\n") == 0 || strcmp(line, "\r\n") == 0) {
-            break;
-        }
-        if (strcmp(line, ".\n") == 0 || strcmp(line, ".\r\n") == 0 || strcmp(line, ".") == 0) {
-            break;
-        }
-        size_t chunk = strlen(line);
-        while (chunk > 0 && (line[chunk - 1] == '\n' || line[chunk - 1] == '\r')) {
-            line[--chunk] = '\0';
-        }
-        if (len + chunk + 2 > cap) {
-            cap *= 2;
-            char *tmp = realloc(buf, cap);
-            if (!tmp) {
-                free(buf);
-                return NULL;
-            }
-            buf = tmp;
-        }
-        if (len > 0) {
-            buf[len++] = ' ';
-        }
-        memcpy(buf + len, line, chunk);
-        len += chunk;
-        buf[len] = '\0';
-    }
-    return buf;
 }
 
 static int ss_read(const char *host, const char *port, const char *file, const char *user, const char *ticket) {
@@ -362,111 +310,110 @@ static int ss_write_session(const char *host,
     }
     free(response);
     printf("Current sentence (%d): %s\n", sentence, current);
-    char *replacement = collect_sentence();
-    if (!replacement) {
-        fprintf(stderr, "Failed to read replacement\n");
-        free(current);
-        net_close(fd);
-        return -1;
-    }
-    size_t old_words = count_words(current);
-    size_t new_words = count_words(replacement);
-    int success = 0;
+    printf("Enter edits as '<word_index> <content>' (use 0 for beginning). Finish with ETIRW.\n");
 
-    char cmd[MAX_JSON];
-    char *escaped = NULL;
-    if (new_words > 0) {
-        escaped = json_escape_dup(replacement);
+    int commit_requested = 0;
+    int commit_success = 0;
+    char line[INPUT_BUF];
+    while (1) {
+        printf("write> ");
+        fflush(stdout);
+        if (!fgets(line, sizeof(line), stdin)) {
+            printf("\n");
+            break;
+        }
+        trim_newline(line);
+        char *ptr = line;
+        while (*ptr && isspace((unsigned char)*ptr)) {
+            ptr++;
+        }
+        if (*ptr == '\0') {
+            continue;
+        }
+        if (strcasecmp(ptr, "ETIRW") == 0) {
+            commit_requested = 1;
+            break;
+        }
+        char *save_ptr = NULL;
+        char *idx_token = strtok_r(ptr, " 	", &save_ptr);
+        if (!idx_token) {
+            continue;
+        }
+        char *content = save_ptr;
+        while (content && *content && isspace((unsigned char)*content)) {
+            content++;
+        }
+        if (!content || !*content) {
+            printf("Usage: <word_index> <content>\n");
+            continue;
+        }
+        errno = 0;
+        char *endptr = NULL;
+        long user_index = strtol(idx_token, &endptr, 10);
+        if (*endptr != '\0' || errno == ERANGE) {
+            printf("Invalid index: %s\n", idx_token);
+            continue;
+        }
+        if (user_index < 0) {
+            printf("Index must be non-negative\n");
+            continue;
+        }
+        int server_index = (int)user_index;
+        if (user_index > 0) {
+            server_index = (int)(user_index - 1);
+        }
+        char *escaped = json_escape_dup(content);
         if (!escaped) {
             fprintf(stderr, "Out of memory\n");
-            goto done;
+            break;
         }
-        if (old_words > 0) {
-            if (snprintf(cmd, sizeof(cmd),
-                         "{\"type\":\"WRITE_REPLACE\",\"index\":0,\"content\":\"%s\"}",
-                         escaped) >= (int)sizeof(cmd)) {
-                fprintf(stderr, "Command too large\n");
-                goto done;
-            }
-            char *resp = NULL;
-            if (send_request(fd, cmd, &resp) < 0 || parse_status(resp, status, sizeof(status), NULL, 0) < 0 || strcmp(status, "OK") != 0) {
-                print_error_response(resp ? resp : "WRITE_REPLACE failed");
-                free(resp);
-                goto done;
-            }
-            free(resp);
-            for (size_t i = 1; i < old_words; ++i) {
-                if (snprintf(cmd, sizeof(cmd), "{\"type\":\"WRITE_DELETE\",\"index\":%zu}", new_words) >=
-                    (int)sizeof(cmd)) {
-                    fprintf(stderr, "Command too large\n");
-                    goto done;
-                }
-                char *del_resp = NULL;
-                if (send_request(fd, cmd, &del_resp) < 0 || parse_status(del_resp, status, sizeof(status), NULL, 0) < 0 || strcmp(status, "OK") != 0) {
-                    print_error_response(del_resp ? del_resp : "WRITE_DELETE failed");
-                    free(del_resp);
-                    goto done;
-                }
-                free(del_resp);
-            }
+        char cmd[MAX_JSON];
+        if (snprintf(cmd, sizeof(cmd),
+                     "{\"type\":\"WRITE_INSERT\",\"index\":%d,\"content\":\"%s\"}",
+                     server_index, escaped) >= (int)sizeof(cmd)) {
+            fprintf(stderr, "Command too large\n");
+            free(escaped);
+            continue;
+        }
+        free(escaped);
+        char *insert_resp = NULL;
+        if (send_request(fd, cmd, &insert_resp) < 0) {
+            fprintf(stderr, "WRITE_INSERT failed\n");
+            free(insert_resp);
+            break;
+        }
+        if (parse_status(insert_resp, status, sizeof(status), NULL, 0) < 0 ||
+            strcmp(status, "OK") != 0) {
+            print_error_response(insert_resp);
+        }
+        free(insert_resp);
+    }
+
+    if (commit_requested) {
+        char commit_cmd[] = "{\"type\":\"WRITE_COMMIT\"}";
+        char *commit_resp = NULL;
+        if (send_request(fd, commit_cmd, &commit_resp) < 0 ||
+            parse_status(commit_resp, status, sizeof(status), NULL, 0) < 0 ||
+            strcmp(status, "OK") != 0) {
+            print_error_response(commit_resp ? commit_resp : "WRITE_COMMIT failed");
         } else {
-            if (snprintf(cmd, sizeof(cmd),
-                         "{\"type\":\"WRITE_INSERT\",\"index\":0,\"content\":\"%s\"}",
-                         escaped) >= (int)sizeof(cmd)) {
-                fprintf(stderr, "Command too large\n");
-                goto done;
-            }
-            char *ins_resp = NULL;
-            if (send_request(fd, cmd, &ins_resp) < 0 || parse_status(ins_resp, status, sizeof(status), NULL, 0) < 0 || strcmp(status, "OK") != 0) {
-                print_error_response(ins_resp ? ins_resp : "WRITE_INSERT failed");
-                free(ins_resp);
-                goto done;
-            }
-            free(ins_resp);
+            printf("Write committed.\n");
+            commit_success = 1;
         }
-    } else {
-        for (size_t i = 0; i < old_words; ++i) {
-            if (snprintf(cmd, sizeof(cmd), "{\"type\":\"WRITE_DELETE\",\"index\":0}") >= (int)sizeof(cmd)) {
-                fprintf(stderr, "Command too large\n");
-                goto done;
-            }
-            char *del_resp = NULL;
-            if (send_request(fd, cmd, &del_resp) < 0 || parse_status(del_resp, status, sizeof(status), NULL, 0) < 0 || strcmp(status, "OK") != 0) {
-                print_error_response(del_resp ? del_resp : "WRITE_DELETE failed");
-                free(del_resp);
-                goto done;
-            }
-            free(del_resp);
-        }
-    }
-
-    if (snprintf(cmd, sizeof(cmd), "{\"type\":\"WRITE_COMMIT\"}") >= (int)sizeof(cmd)) {
-        fprintf(stderr, "Command too large\n");
-        goto done;
-    }
-    char *commit_resp = NULL;
-    if (send_request(fd, cmd, &commit_resp) < 0 || parse_status(commit_resp, status, sizeof(status), NULL, 0) < 0 || strcmp(status, "OK") != 0) {
-        print_error_response(commit_resp ? commit_resp : "WRITE_COMMIT failed");
         free(commit_resp);
-        goto done;
     }
-    printf("Write committed.\n");
-    free(commit_resp);
-    success = 1;
 
-done:
-    if (!success) {
-        if (snprintf(cmd, sizeof(cmd), "{\"type\":\"WRITE_ABORT\"}") < (int)sizeof(cmd)) {
-            char *abort_resp = NULL;
-            send_request(fd, cmd, &abort_resp);
-            free(abort_resp);
-        }
+    if (!commit_success) {
+        char abort_cmd[] = "{\"type\":\"WRITE_ABORT\"}";
+        char *abort_resp = NULL;
+        send_request(fd, abort_cmd, &abort_resp);
+        free(abort_resp);
     }
-    free(escaped);
     free(current);
-    free(replacement);
     net_close(fd);
-    return success ? 0 : -1;
+    return commit_success ? 0 : -1;
+}
+
 }
 
 static int handle_view(int nm_fd, const char *flags) {
@@ -510,6 +457,8 @@ static int handle_view(int nm_fd, const char *flags) {
             char name[128];
             char owner[128];
             char last_user[128];
+            char primary[128] = "";
+            char backup[128] = "";
             int words = -1;
             int chars = -1;
             int have_owner = json_get_string(chunk, "owner", owner, sizeof(owner)) == 0;
@@ -517,8 +466,13 @@ static int handle_view(int nm_fd, const char *flags) {
                 if (have_owner && json_get_int(chunk, "words", &words) == 0 &&
                     json_get_int(chunk, "chars", &chars) == 0 &&
                     json_get_string(chunk, "lastAccessUser", last_user, sizeof(last_user)) == 0) {
+                    json_get_string(chunk, "primaryServer", primary, sizeof(primary));
+                    json_get_string(chunk, "backupServer", backup, sizeof(backup));
                     printf("  %s (owner: %s, words: %d, chars: %d, last user: %s)\n",
                            name, owner, words, chars, last_user);
+                    printf("    primary: %s, backup: %s\n",
+                           primary[0] ? primary : "none",
+                           backup[0] ? backup : "none");
                 } else {
                     printf("  %s\n", name);
                 }
@@ -617,6 +571,8 @@ static int handle_info_cmd(int nm_fd, const char *file) {
     char name[128] = "";
     char owner[128] = "";
     char last_user[128] = "";
+    char primary[128] = "";
+    char backup[128] = "";
     int words = -1;
     int chars = -1;
     int created = 0;
@@ -630,6 +586,8 @@ static int handle_info_cmd(int nm_fd, const char *file) {
     json_get_int(chunk, "modified", &modified);
     json_get_int(chunk, "lastAccess", &last_access);
     json_get_string(chunk, "lastAccessUser", last_user, sizeof(last_user));
+    json_get_string(chunk, "primaryServer", primary, sizeof(primary));
+    json_get_string(chunk, "backupServer", backup, sizeof(backup));
     printf("File: %s\n", name[0] ? name : file);
     printf("  Owner: %s\n", owner);
     printf("  Words: %d\n", words);
@@ -637,6 +595,8 @@ static int handle_info_cmd(int nm_fd, const char *file) {
     printf("  Created: %d\n", created);
     printf("  Modified: %d\n", modified);
     printf("  Last Access: %d by %s\n", last_access, last_user);
+    printf("  Primary Server: %s\n", primary[0] ? primary : "unknown");
+    printf("  Backup Server: %s\n", backup[0] ? backup : "none");
     free(response);
     return 0;
 }
@@ -919,20 +879,21 @@ static int handle_exec_cmd(int nm_fd, const char *file) {
 
 static void print_help(void) {
     printf("Commands:\n");
-    printf("  view [-a] [-l]\n");
-    printf("  list\n");
-    printf("  info <file>\n");
-    printf("  create <file>\n");
-    printf("  delete <file>\n");
-    printf("  read <file>\n");
-    printf("  write <file> [sentence]\n");
-    printf("  stream <file>\n");
-    printf("  addaccess <file> <user> [rw]\n");
-    printf("  remaccess <file> <user>\n");
-    printf("  undo <file>\n");
-    printf("  exec <file>\n");
-    printf("  help\n");
-    printf("  quit\n");
+    printf("  VIEW [-a] [-l]\n");
+    printf("  LIST\n");
+    printf("  INFO <file>\n");
+    printf("  CREATE <file>\n");
+    printf("  DELETE <file>\n");
+    printf("  READ <file>\n");
+    printf("  WRITE <file> [sentence]\n");
+    printf("    After WRITE, enter '<word_index> <content>' lines and finish with ETIRW.\n");
+    printf("  STREAM <file>\n");
+    printf("  ADDACCESS <file> <user> [rw]\n");
+    printf("  REMACCESS <file> <user>\n");
+    printf("  UNDO <file>\n");
+    printf("  EXEC <file>\n");
+    printf("  HELP\n");
+    printf("  QUIT\n");
 }
 
 int main(int argc, char **argv) {
@@ -1025,32 +986,28 @@ int main(int argc, char **argv) {
         if (input[0] == '\0') {
             continue;
         }
-        char *save = NULL;
         char *cmd = strtok_r(input, " ", &save);
         if (!cmd) {
             continue;
         }
-        if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
-            break;
+        for (char *p = cmd; *p; ++p) {
+            *p = toupper((unsigned char)*p);
         }
-        if (strcmp(cmd, "help") == 0) {
+        if (strcmp(cmd, "HELP") == 0) {
             print_help();
             continue;
         }
-        if (strcmp(cmd, "view") == 0) {
+        if (strcmp(cmd, "VIEW") == 0) {
             char flags[4] = "";
             char *token = strtok_r(NULL, " ", &save);
             while (token) {
                 if (token[0] == '-') {
                     for (size_t i = 1; token[i]; ++i) {
-                        if (token[i] == 'a' || token[i] == 'A') {
-                            if (!strchr(flags, 'a')) {
-                                strcat(flags, "a");
-                            }
-                        } else if (token[i] == 'l' || token[i] == 'L') {
-                            if (!strchr(flags, 'l')) {
-                                strcat(flags, "l");
-                            }
+                        char flag = (char)tolower((unsigned char)token[i]);
+                        if (flag == 'a' && !strchr(flags, 'a')) {
+                            strcat(flags, "a");
+                        } else if (flag == 'l' && !strchr(flags, 'l')) {
+                            strcat(flags, "l");
                         }
                     }
                 }
@@ -1059,70 +1016,70 @@ int main(int argc, char **argv) {
             handle_view(nm_fd, flags);
             continue;
         }
-        if (strcmp(cmd, "list") == 0) {
+        if (strcmp(cmd, "LIST") == 0) {
             handle_list_users(nm_fd);
             continue;
         }
-        if (strcmp(cmd, "info") == 0) {
+        if (strcmp(cmd, "INFO") == 0) {
             char *file = strtok_r(NULL, "", &save);
             if (!file) {
-                printf("usage: info <file>\n");
+                printf("usage: INFO <file>\n");
                 continue;
             }
-            while (*file == ' ') file++;
+            while (*file && isspace((unsigned char)*file)) file++;
             handle_info_cmd(nm_fd, file);
             continue;
         }
-        if (strcmp(cmd, "create") == 0) {
+        if (strcmp(cmd, "CREATE") == 0) {
             char *file = strtok_r(NULL, "", &save);
             if (!file) {
-                printf("usage: create <file>\n");
+                printf("usage: CREATE <file>\n");
                 continue;
             }
-            while (*file == ' ') file++;
+            while (*file && isspace((unsigned char)*file)) file++;
             handle_create_cmd(nm_fd, file);
             continue;
         }
-        if (strcmp(cmd, "delete") == 0) {
+        if (strcmp(cmd, "DELETE") == 0) {
             char *file = strtok_r(NULL, "", &save);
             if (!file) {
-                printf("usage: delete <file>\n");
+                printf("usage: DELETE <file>\n");
                 continue;
             }
-            while (*file == ' ') file++;
+            while (*file && isspace((unsigned char)*file)) file++;
             handle_delete_cmd(nm_fd, file);
             continue;
         }
-        if (strcmp(cmd, "read") == 0) {
+        if (strcmp(cmd, "READ") == 0) {
             char *file = strtok_r(NULL, "", &save);
             if (!file) {
-                printf("usage: read <file>\n");
+                printf("usage: READ <file>\n");
                 continue;
             }
-            while (*file == ' ') file++;
+            while (*file && isspace((unsigned char)*file)) file++;
             handle_read_cmd(nm_fd, file);
             continue;
         }
-        if (strcmp(cmd, "stream") == 0) {
+        if (strcmp(cmd, "STREAM") == 0) {
             char *file = strtok_r(NULL, "", &save);
             if (!file) {
-                printf("usage: stream <file>\n");
+                printf("usage: STREAM <file>\n");
                 continue;
             }
-            while (*file == ' ') file++;
+            while (*file && isspace((unsigned char)*file)) file++;
             handle_stream_cmd(nm_fd, file);
             continue;
         }
-        if (strcmp(cmd, "write") == 0) {
+        if (strcmp(cmd, "WRITE") == 0) {
             char *file = strtok_r(NULL, " ", &save);
             if (!file) {
-                printf("usage: write <file> [sentence]\n");
+                printf("usage: WRITE <file> [sentence]\n");
                 continue;
             }
             char *sentence_tok = strtok_r(NULL, "", &save);
             int sentence = 0;
             if (sentence_tok) {
-                while (*sentence_tok == ' ') sentence_tok++;
+                while (*sentence_tok && isspace((unsigned char)*sentence_tok)) sentence_tok++;
                 if (*sentence_tok) {
                     char *endptr = NULL;
                     long val = strtol(sentence_tok, &endptr, 10);
@@ -1136,17 +1093,17 @@ int main(int argc, char **argv) {
             handle_write_cmd(nm_fd, file, sentence);
             continue;
         }
-        if (strcmp(cmd, "addaccess") == 0) {
+        if (strcmp(cmd, "ADDACCESS") == 0) {
             char *file = strtok_r(NULL, " ", &save);
             char *user = strtok_r(NULL, " ", &save);
             char *mode = strtok_r(NULL, "", &save);
             if (!file || !user) {
-                printf("usage: addaccess <file> <user> [rw]\n");
+                printf("usage: ADDACCESS <file> <user> [rw]\n");
                 continue;
             }
             int write_perm = 0;
             if (mode) {
-                while (*mode == ' ') mode++;
+                while (*mode && isspace((unsigned char)*mode)) mode++;
                 if (*mode == 'r' || *mode == 'R') {
                     if (strchr(mode, 'w') || strchr(mode, 'W')) {
                         write_perm = 1;
@@ -1158,36 +1115,39 @@ int main(int argc, char **argv) {
             handle_addaccess_cmd(nm_fd, file, user, write_perm);
             continue;
         }
-        if (strcmp(cmd, "remaccess") == 0) {
+        if (strcmp(cmd, "REMACCESS") == 0) {
             char *file = strtok_r(NULL, " ", &save);
             char *user = strtok_r(NULL, "", &save);
             if (!file || !user) {
-                printf("usage: remaccess <file> <user>\n");
+                printf("usage: REMACCESS <file> <user>\n");
                 continue;
             }
-            while (*user == ' ') user++;
+            while (*user && isspace((unsigned char)*user)) user++;
             handle_remaccess_cmd(nm_fd, file, user);
             continue;
         }
-        if (strcmp(cmd, "undo") == 0) {
+        if (strcmp(cmd, "UNDO") == 0) {
             char *file = strtok_r(NULL, "", &save);
             if (!file) {
-                printf("usage: undo <file>\n");
+                printf("usage: UNDO <file>\n");
                 continue;
             }
-            while (*file == ' ') file++;
+            while (*file && isspace((unsigned char)*file)) file++;
             handle_undo_cmd(nm_fd, file);
             continue;
         }
-        if (strcmp(cmd, "exec") == 0) {
+        if (strcmp(cmd, "EXEC") == 0) {
             char *file = strtok_r(NULL, "", &save);
             if (!file) {
-                printf("usage: exec <file>\n");
+                printf("usage: EXEC <file>\n");
                 continue;
             }
-            while (*file == ' ') file++;
+            while (*file && isspace((unsigned char)*file)) file++;
             handle_exec_cmd(nm_fd, file);
             continue;
+        }
+        if (strcmp(cmd, "QUIT") == 0) {
+            break;
         }
         printf("Unknown command. Type 'help'.\n");
     }

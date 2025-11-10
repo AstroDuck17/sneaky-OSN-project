@@ -74,6 +74,12 @@ static char *join_sentences(struct array *sentences);
 static char *load_text(const char *path, size_t *out_size);
 static int store_text_atomic(const char *path, const char *content);
 static size_t count_words_in_text(const char *text);
+static int ss_fetch_remote_content(const char *host,
+                                   const char *port,
+                                   const char *file,
+                                   const char *user,
+                                   const char *ticket,
+                                   char **out_content);
 static int valid_filename(const char *name);
 static void ticket_table_init(struct ticket_table *table);
 static void ticket_table_destroy(struct ticket_table *table);
@@ -88,6 +94,7 @@ static struct auth_ticket *ticket_table_take(struct ticket_table *table,
                                              const char *user,
                                              const char *file,
                                              const char *op);
+static int handle_nm_sync(struct ss_context *ctx, const char *json);
 static void sleep_ms(int ms);
 static int ensure_directory(const char *path) {
     struct stat st;
@@ -795,6 +802,122 @@ static void handle_data_client(struct ss_context *ctx, int client_fd) {
     net_close(client_fd);
 }
 
+static int ss_fetch_remote_content(const char *host,
+                                   const char *port,
+                                   const char *file,
+                                   const char *user,
+                                   const char *ticket,
+                                   char **out_content) {
+    int fd = net_connect(host, port);
+    if (fd < 0) {
+        return -1;
+    }
+    char *file_esc = json_escape_dup(file);
+    char *user_esc = json_escape_dup(user);
+    char *ticket_esc = json_escape_dup(ticket);
+    if (!file_esc || !user_esc || !ticket_esc) {
+        free(file_esc);
+        free(user_esc);
+        free(ticket_esc);
+        net_close(fd);
+        return -1;
+    }
+    char payload[MAX_JSON];
+    if (snprintf(payload, sizeof(payload),
+                 "{\"type\":\"READ\",\"file\":\"%s\",\"user\":\"%s\",\"ticket\":\"%s\"}",
+                 file_esc, user_esc, ticket_esc) >= (int)sizeof(payload)) {
+        free(file_esc);
+        free(user_esc);
+        free(ticket_esc);
+        net_close(fd);
+        return -1;
+    }
+    free(file_esc);
+    free(user_esc);
+    free(ticket_esc);
+
+    char *response = NULL;
+    if (net_send_json(fd, payload) < 0 || net_recv_json(fd, &response) < 0) {
+        net_close(fd);
+        free(response);
+        return -1;
+    }
+    net_close(fd);
+    char status[16];
+    if (json_get_string(response, "status", status, sizeof(status)) < 0 || strcmp(status, "OK") != 0) {
+        free(response);
+        return -1;
+    }
+    char *content = NULL;
+    if (json_get_string_alloc(response, "content", &content) < 0) {
+        free(response);
+        return -1;
+    }
+    free(response);
+    *out_content = content;
+    return 0;
+}
+
+static int handle_nm_sync(struct ss_context *ctx, const char *json) {
+    char file_name[SS_NAME_MAX];
+    char owner[SS_USER_MAX];
+    char source_host[64];
+    char source_port[16];
+    char ticket[MAX_TOKEN_LEN];
+    if (json_get_string(json, "file", file_name, sizeof(file_name)) < 0 ||
+        json_get_string(json, "owner", owner, sizeof(owner)) < 0 ||
+        json_get_string(json, "sourceHost", source_host, sizeof(source_host)) < 0 ||
+        json_get_string(json, "sourcePort", source_port, sizeof(source_port)) < 0 ||
+        json_get_string(json, "ticket", ticket, sizeof(ticket)) < 0) {
+        return send_error_response(ctx->nm_fd, ERR_BADREQ, "invalid sync");
+    }
+    char *content = NULL;
+    if (ss_fetch_remote_content(source_host, source_port, file_name, owner, ticket, &content) < 0) {
+        return send_error_response(ctx->nm_fd, ERR_INTERNAL, "sync failed");
+    }
+    size_t idx = 0;
+    struct ss_file *file = ss_state_find(&ctx->state, file_name, &idx);
+    if (!file) {
+        if (ss_state_add(&ctx->state, file_name, owner) < 0) {
+            free(content);
+            return send_error_response(ctx->nm_fd, ERR_INTERNAL, "sync failed");
+        }
+        file = ss_state_find(&ctx->state, file_name, &idx);
+        if (!file) {
+            free(content);
+            return send_error_response(ctx->nm_fd, ERR_INTERNAL, "sync failed");
+        }
+    }
+    char *existing = load_text(file->data_path, NULL);
+    if (!existing) {
+        existing = strdup("");
+        if (!existing) {
+            free(content);
+            return send_error_response(ctx->nm_fd, ERR_INTERNAL, "sync failed");
+        }
+    }
+    if (store_text_atomic(file->undo_path, existing) < 0) {
+        free(existing);
+        free(content);
+        return send_error_response(ctx->nm_fd, ERR_INTERNAL, "sync failed");
+    }
+    free(existing);
+    if (store_text_atomic(file->data_path, content) < 0) {
+        free(content);
+        return send_error_response(ctx->nm_fd, ERR_INTERNAL, "sync failed");
+    }
+    file->char_count = strlen(content);
+    file->word_count = count_words_in_text(content);
+    time_t now = time(NULL);
+    file->modified = now;
+    file->last_access = now;
+    snprintf(file->last_access_user, sizeof(file->last_access_user), "%s", owner);
+    ss_state_save_meta(&ctx->state, file);
+    log_request(ctx, "SYNC file=%s owner=%s", file_name, owner);
+    free(content);
+    return send_ok(ctx->nm_fd, "\"op\":\"SYNC\"");
+}
+
 static int process_nm_command(struct ss_context *ctx) {
     char *json = NULL;
     if (net_recv_json(ctx->nm_fd, &json) < 0) {
@@ -881,6 +1004,8 @@ static int process_nm_command(struct ss_context *ctx) {
                 }
             }
         }
+    } else if (strcmp(type, "NM_SYNC") == 0) {
+        return handle_nm_sync(ctx, json);
     } else if (strcmp(type, "PING") == 0) {
         send_ok(ctx->nm_fd, "\"op\":\"PING\"");
     } else {

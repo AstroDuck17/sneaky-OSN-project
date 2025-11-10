@@ -47,3 +47,5 @@
 [2025-11-01T10:48:15.276Z] CREATE user=alice file=script.sh
 [2025-11-01T10:48:15.364Z] WRITE user=alice file=script.sh
 [2025-11-01T10:48:15.526Z] EXEC user=alice file=script.sh
+[2025-11-09T13:24:43.231Z] CREATE user=alice file=H.txt
+[2025-11-09T13:28:46.331Z] CREATE user=alice file=h.txt

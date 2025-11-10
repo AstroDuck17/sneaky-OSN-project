@@ -54,8 +54,10 @@ def run_test() -> int:
 
     tempdir = Path(tempfile.mkdtemp(prefix="docspp-test-"))
     state_file = tempdir / "nm_state.db"
-    storage_dir = tempdir / "storage"
-    storage_dir.mkdir(parents=True, exist_ok=True)
+    storage_dir1 = tempdir / "storage1"
+    storage_dir2 = tempdir / "storage2"
+    storage_dir1.mkdir(parents=True, exist_ok=True)
+    storage_dir2.mkdir(parents=True, exist_ok=True)
 
     nm_proc = subprocess.Popen(
         [str(BIN_NM), "5000", str(state_file)],
@@ -63,9 +65,11 @@ def run_test() -> int:
         stderr=subprocess.STDOUT,
         text=True,
     )
+    ss1_proc = None
+    ss2_proc = None
     try:
         time.sleep(0.2)
-        ss_proc = subprocess.Popen(
+        ss1_proc = subprocess.Popen(
             [
                 str(BIN_SS),
                 "ss1",
@@ -73,7 +77,21 @@ def run_test() -> int:
                 "6000",
                 "127.0.0.1",
                 "5000",
-                str(storage_dir),
+                str(storage_dir1),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        ss2_proc = subprocess.Popen(
+            [
+                str(BIN_SS),
+                "ss2",
+                "127.0.0.1",
+                "6001",
+                "127.0.0.1",
+                "5000",
+                str(storage_dir2),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -118,6 +136,13 @@ def run_test() -> int:
                     return 1
                 host, port, ticket = resp["host"], resp["port"], resp["ticket"]
 
+                operations = [
+                    "This is a test sentence.",
+                    " Another sentence follows.",
+                    " Final sentence to wrap up.",
+                ]
+                expected_text = "This is a test sentence. Another sentence follows. Final sentence to wrap up."
+                inserted = 0
                 with closing(socket.create_connection((host, int(port)))) as ss_sock:
                     send_json(
                         ss_sock,
@@ -133,18 +158,20 @@ def run_test() -> int:
                     if resp_ss.get("status") != "OK":
                         print("WRITE_BEGIN failed", resp_ss, file=sys.stderr)
                         return 1
-                    send_json(
-                        ss_sock,
-                        {
-                            "type": "WRITE_INSERT",
-                            "index": 0,
-                            "content": "This is a test sentence.",
-                        },
-                    )
-                    resp_ss = recv_json(ss_sock)
-                    if resp_ss.get("status") != "OK":
-                        print("WRITE_INSERT failed", resp_ss, file=sys.stderr)
-                        return 1
+                    for chunk in operations:
+                        send_json(
+                            ss_sock,
+                            {
+                                "type": "WRITE_INSERT",
+                                "index": inserted,
+                                "content": chunk,
+                            },
+                        )
+                        resp_ss = recv_json(ss_sock)
+                        if resp_ss.get("status") != "OK":
+                            print("WRITE_INSERT failed", resp_ss, file=sys.stderr)
+                            return 1
+                        inserted += len(chunk.strip().split())
                     send_json(ss_sock, {"type": "WRITE_COMMIT"})
                     resp_ss = recv_json(ss_sock)
                     if resp_ss.get("status") != "OK":
@@ -155,6 +182,10 @@ def run_test() -> int:
                 resp = recv_json(nm_sock)
                 if resp.get("status") != "OK":
                     print("READ lookup failed", resp, file=sys.stderr)
+                    return 1
+                primary_server = resp.get("server")
+                if primary_server != "ss1":
+                    print("Unexpected primary server", resp, file=sys.stderr)
                     return 1
                 host, port, ticket = resp["host"], resp["port"], resp["ticket"]
                 with closing(socket.create_connection((host, int(port)))) as ss_sock:
@@ -168,9 +199,103 @@ def run_test() -> int:
                         },
                     )
                     resp_ss = recv_json(ss_sock)
-                    if resp_ss.get("status") != "OK" or "This is a test sentence." not in resp_ss.get("content", ""):
+                    if resp_ss.get("status") != "OK" or resp_ss.get("content") != expected_text:
                         print("READ failed", resp_ss, file=sys.stderr)
                         return 1
+
+                send_json(nm_sock, {"type": "INFO", "file": "doc.txt"})
+                resp = recv_json(nm_sock)
+                if resp.get("status") != "OK" or resp.get("file", {}).get("name") != "doc.txt":
+                    print("INFO failed", resp, file=sys.stderr)
+                    return 1
+                file_meta = resp.get("file", {})
+                if file_meta.get("primaryServer") != "ss1" or file_meta.get("backupServer") != "ss2":
+                    print("INFO server mismatch before failover", resp, file=sys.stderr)
+                    return 1
+
+                send_json(nm_sock, {"type": "STREAM", "file": "doc.txt"})
+                resp = recv_json(nm_sock)
+                if resp.get("status") != "OK":
+                    print("STREAM lookup failed", resp, file=sys.stderr)
+                    return 1
+                host, port, ticket = resp["host"], resp["port"], resp["ticket"]
+                streamed_words = []
+                with closing(socket.create_connection((host, int(port)))) as ss_sock:
+                    send_json(
+                        ss_sock,
+                        {
+                            "type": "STREAM",
+                            "file": "doc.txt",
+                            "user": "alice",
+                            "ticket": ticket,
+                        },
+                    )
+                    header = recv_json(ss_sock)
+                    if header.get("status") != "OK":
+                        print("STREAM start failed", header, file=sys.stderr)
+                        return 1
+                    while True:
+                        chunk = recv_json(ss_sock)
+                        if chunk.get("status") == "DONE":
+                            break
+                        if chunk.get("status") == "DATA" and "word" in chunk:
+                            streamed_words.append(chunk["word"])
+                if streamed_words != expected_text.split():
+                    print("STREAM output mismatch", streamed_words, file=sys.stderr)
+                    return 1
+
+                ss1_proc.terminate()
+                try:
+                    ss1_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    ss1_proc.kill()
+                ss1_proc = None
+                time.sleep(0.2)
+
+                send_json(nm_sock, {"type": "READ", "file": "doc.txt"})
+                resp = recv_json(nm_sock)
+                if resp.get("status") != "OK":
+                    print("READ lookup failed after failover", resp, file=sys.stderr)
+                    return 1
+                if resp.get("server") != "ss2":
+                    print("Expected backup server after failover", resp, file=sys.stderr)
+                    return 1
+                host, port, ticket = resp["host"], resp["port"], resp["ticket"]
+                with closing(socket.create_connection((host, int(port)))) as ss_sock:
+                    send_json(
+                        ss_sock,
+                        {
+                            "type": "READ",
+                            "file": "doc.txt",
+                            "user": "alice",
+                            "ticket": ticket,
+                        },
+                    )
+                    resp_ss = recv_json(ss_sock)
+                    if resp_ss.get("status") != "OK" or resp_ss.get("content") != expected_text:
+                        print("READ after failover failed", resp_ss, file=sys.stderr)
+                        return 1
+
+                send_json(nm_sock, {"type": "INFO", "file": "doc.txt"})
+                resp = recv_json(nm_sock)
+                if resp.get("status") != "OK" or resp.get("file", {}).get("name") != "doc.txt":
+                    print("INFO failed", resp, file=sys.stderr)
+                    return 1
+                file_meta = resp.get("file", {})
+                if file_meta.get("primaryServer") != "ss2" or file_meta.get("backupServer") != "ss1":
+                    print("INFO server mismatch after failover", resp, file=sys.stderr)
+                    return 1
+
+                send_json(nm_sock, {"type": "DELETE", "file": "doc.txt"})
+                resp = recv_json(nm_sock)
+                if resp.get("status") != "OK":
+                    print("DELETE failed", resp, file=sys.stderr)
+                    return 1
+                if (storage_dir1 / "files" / "doc.txt").exists() or (
+                    storage_dir2 / "files" / "doc.txt"
+                ).exists():
+                    print("File still exists on storage directories", file=sys.stderr)
+                    return 1
 
                 send_json(nm_sock, {"type": "UNDO", "file": "doc.txt"})
                 resp = recv_json(nm_sock)
@@ -261,11 +386,13 @@ def run_test() -> int:
             return 0
 
         finally:
-            ss_proc.terminate()
-            try:
-                ss_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                ss_proc.kill()
+            for proc in (ss1_proc, ss2_proc):
+                if proc:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
 
     finally:
         nm_proc.terminate()

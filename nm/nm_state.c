@@ -103,6 +103,18 @@ int nm_pick_server(const struct nm_state *state) {
     return -1;
 }
 
+int nm_pick_backup_server(const struct nm_state *state, int exclude) {
+    for (size_t i = 0; i < state->server_count; ++i) {
+        if ((int)i == exclude) {
+            continue;
+        }
+        if (state->servers[i].ctrl_fd >= 0 && state->servers[i].online) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
 static int find_file_index(struct nm_state *state, const char *name) {
     for (size_t i = 0; i < state->file_count; ++i) {
         if (strcmp(state->files[i].name, name) == 0) {
@@ -124,6 +136,7 @@ int nm_add_file(struct nm_state *state,
                 const char *name,
                 const char *owner,
                 int ss_index,
+                int backup_index,
                 time_t now) {
     if (state->file_count >= NM_MAX_FILES) {
         errno = ENOSPC;
@@ -138,6 +151,7 @@ int nm_add_file(struct nm_state *state,
     snprintf(file->name, sizeof(file->name), "%s", name);
     snprintf(file->owner, sizeof(file->owner), "%s", owner);
     file->ss_index = ss_index;
+    file->backup_index = backup_index;
     file->created = now;
     file->modified = now;
     file->last_access = now;
@@ -368,10 +382,11 @@ int nm_state_save(struct nm_state *state) {
     }
     for (size_t i = 0; i < state->file_count; ++i) {
         struct file_entry *file = &state->files[i];
-        write_line(fp, "FILE %s %s %d %zu %zu %ld %ld %ld %s %zu",
+        write_line(fp, "FILE %s %s %d %d %zu %zu %ld %ld %ld %s %zu",
                    file->name,
                    file->owner,
                    file->ss_index,
+                   file->backup_index,
                    file->word_count,
                    file->char_count,
                    (long)file->created,
@@ -434,22 +449,53 @@ int nm_state_load(struct nm_state *state) {
             }
             struct file_entry file;
             memset(&file, 0, sizeof(file));
+            char buffer[512];
+            strncpy(buffer, line + 5, sizeof(buffer) - 1);
+            buffer[sizeof(buffer) - 1] = '\0';
+            char *save = NULL;
+            char *tokens[12];
+            int tok_count = 0;
+            char *tok = strtok_r(buffer, " ", &save);
+            while (tok && tok_count < 12) {
+                tokens[tok_count++] = tok;
+                tok = strtok_r(NULL, " ", &save);
+            }
+            if (tok_count < 10) {
+                current_file = NULL;
+                continue;
+            }
+            strncpy(file.name, tokens[0], sizeof(file.name) - 1);
+            strncpy(file.owner, tokens[1], sizeof(file.owner) - 1);
+            int idx = 2;
+            if (tok_count == 11) {
+                file.ss_index = atoi(tokens[idx++]);
+                file.backup_index = atoi(tokens[idx++]);
+            } else {
+                file.ss_index = atoi(tokens[idx++]);
+                file.backup_index = -1;
+            }
             size_t acl_count = 0;
-            long created = 0, modified = 0, last_access = 0;
-            if (sscanf(line + 5, "%127s %63s %d %zu %zu %ld %ld %ld %63s %zu",
-                       file.name, file.owner, &file.ss_index,
-                       &file.word_count, &file.char_count,
-                       &created, &modified, &last_access,
-                       file.last_access_user, &acl_count) >= 9) {
-                file.created = (time_t)created;
-                file.modified = (time_t)modified;
-                file.last_access = (time_t)last_access;
-                file.acl_count = 0;
-                state->files[state->file_count++] = file;
-                current_file = &state->files[state->file_count - 1];
+            long created = 0;
+            long modified = 0;
+            long last_access = 0;
+            if (idx + 7 <= tok_count) {
+                file.word_count = (size_t)strtoull(tokens[idx++], NULL, 10);
+                file.char_count = (size_t)strtoull(tokens[idx++], NULL, 10);
+                created = atol(tokens[idx++]);
+                modified = atol(tokens[idx++]);
+                last_access = atol(tokens[idx++]);
+                strncpy(file.last_access_user, tokens[idx++], sizeof(file.last_access_user) - 1);
+                acl_count = (size_t)strtoull(tokens[idx++], NULL, 10);
             } else {
                 current_file = NULL;
+                continue;
             }
+            file.created = (time_t)created;
+            file.modified = (time_t)modified;
+            file.last_access = (time_t)last_access;
+            file.acl_count = 0;
+            state->files[state->file_count++] = file;
+            current_file = &state->files[state->file_count - 1];
         } else if (strncmp(line, "ACL ", 4) == 0) {
             if (current_file && current_file->acl_count < NM_MAX_ACL) {
                 struct file_acl_entry *acl = &current_file->acl[current_file->acl_count++];

@@ -33,6 +33,7 @@ struct file_entry {
     char name[NM_MAX_NAME];
     char owner[NM_MAX_USER];
     int ss_index;
+    int backup_index;
     size_t word_count;
     size_t char_count;
     time_t created;
@@ -81,12 +82,14 @@ int nm_find_server_by_id(const struct nm_state *state, const char *id);
 struct storage_server *nm_get_server(struct nm_state *state, int index);
 void nm_mark_server_down(struct nm_state *state, int index);
 int nm_pick_server(const struct nm_state *state);
+int nm_pick_backup_server(const struct nm_state *state, int exclude);
 
 struct file_entry *nm_find_file(struct nm_state *state, const char *name);
 int nm_add_file(struct nm_state *state,
                 const char *name,
                 const char *owner,
                 int ss_index,
+                int backup_index,
                 time_t now);
 int nm_remove_file(struct nm_state *state, const char *name);
 int nm_update_file_location(struct nm_state *state, const char *name, int ss_index);

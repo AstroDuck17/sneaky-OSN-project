@@ -433,13 +433,31 @@ static int handle_client_view(struct nm_context *ctx, struct peer *p, const char
             json_escape_string(last_user_esc, sizeof(last_user_esc), file->last_access_user) < 0) {
             return send_error_response(p->fd, ERR_INTERNAL, "encoding error");
         }
+        char primary_id[256] = "";
+        char backup_id[256] = "";
+        struct storage_server *primary = (file->ss_index >= 0)
+                                           ? nm_get_server(&ctx->state, file->ss_index)
+                                           : NULL;
+        struct storage_server *backup = (file->backup_index >= 0)
+                                          ? nm_get_server(&ctx->state, file->backup_index)
+                                          : NULL;
+        if (primary) {
+            json_escape_string(primary_id, sizeof(primary_id), primary->id);
+        }
+        if (backup) {
+            json_escape_string(backup_id, sizeof(backup_id), backup->id);
+        }
         if (long_format) {
             json_append(extra, sizeof(extra), &offset,
                         "{\"name\":\"%s\",\"owner\":\"%s\",\"words\":%zu,",
                         name_esc, owner_esc, file->word_count);
             json_append(extra, sizeof(extra), &offset,
-                        "\"chars\":%zu,\"lastAccess\":%ld,\"lastAccessUser\":\"%s\"}",
+                        "\"chars\":%zu,\"lastAccess\":%ld,\"lastAccessUser\":\"%s\",",
                         file->char_count, (long)file->last_access, last_user_esc);
+            json_append(extra, sizeof(extra), &offset,
+                        "\"primaryServer\":\"%s\",\"backupServer\":\"%s\"}",
+                        primary_id[0] ? primary_id : "",
+                        backup_id[0] ? backup_id : "");
         } else {
             json_append(extra, sizeof(extra), &offset, "{\"name\":\"%s\"}", name_esc);
         }
@@ -494,6 +512,20 @@ static int handle_client_info(struct nm_context *ctx, struct peer *p, const char
         json_escape_string(last_user_esc, sizeof(last_user_esc), file->last_access_user) < 0) {
         return send_error_response(p->fd, ERR_INTERNAL, "encoding error");
     }
+    char primary_id[256] = "";
+    char backup_id[256] = "";
+    struct storage_server *primary = (file->ss_index >= 0)
+                                       ? nm_get_server(&ctx->state, file->ss_index)
+                                       : NULL;
+    struct storage_server *backup = (file->backup_index >= 0)
+                                      ? nm_get_server(&ctx->state, file->backup_index)
+                                      : NULL;
+    if (primary) {
+        json_escape_string(primary_id, sizeof(primary_id), primary->id);
+    }
+    if (backup) {
+        json_escape_string(backup_id, sizeof(backup_id), backup->id);
+    }
     char extra[MAX_JSON];
     int offset = 0;
     json_append(extra, sizeof(extra), &offset,
@@ -503,8 +535,12 @@ static int handle_client_info(struct nm_context *ctx, struct peer *p, const char
                 "\"chars\":%zu,\"created\":%ld,\"modified\":%ld,",
                 file->char_count, (long)file->created, (long)file->modified);
     json_append(extra, sizeof(extra), &offset,
-                "\"lastAccess\":%ld,\"lastAccessUser\":\"%s\"}",
+                "\"lastAccess\":%ld,\"lastAccessUser\":\"%s\",",
                 (long)file->last_access, last_user_esc);
+    json_append(extra, sizeof(extra), &offset,
+                "\"primaryServer\":\"%s\",\"backupServer\":\"%s\"}",
+                primary_id[0] ? primary_id : "",
+                backup_id[0] ? backup_id : "");
     if (offset < 0) {
         return send_error_response(p->fd, ERR_INTERNAL, "response too large");
     }
@@ -554,7 +590,20 @@ static int handle_client_create(struct nm_context *ctx, struct peer *p, const ch
         return send_error_response(p->fd, ERR_INTERNAL, "create failed");
     }
     time_t now = time(NULL);
-    if (nm_add_file(&ctx->state, file_name, p->user, ss_index, now) < 0) {
+    int backup_index = nm_pick_backup_server(&ctx->state, ss_index);
+    if (backup_index >= 0) {
+        struct storage_server *backup = nm_get_server(&ctx->state, backup_index);
+        char *backup_resp = NULL;
+        if (!backup || backup->ctrl_fd < 0 ||
+            forward_command(backup, payload, &backup_resp) < 0 ||
+            parse_status(backup_resp, status, sizeof(status), NULL, 0) < 0 ||
+            strcmp(status, "OK") != 0) {
+            log_event(ctx, "BACKUP create failed file=%s server=%d", file_name, backup_index);
+            backup_index = -1;
+        }
+        free(backup_resp);
+    }
+    if (nm_add_file(&ctx->state, file_name, p->user, ss_index, backup_index, now) < 0) {
         return send_error_response(p->fd, ERR_INTERNAL, "state update failed");
     }
     nm_grant_access(&ctx->state, file_name, p->user, NM_PERM_WRITE | NM_PERM_READ);
@@ -576,9 +625,9 @@ static int handle_client_delete(struct nm_context *ctx, struct peer *p, const ch
     if (file_has_access(file, p->user, NM_PERM_WRITE) != 0) {
         return send_error_response(p->fd, ERR_NOAUTH, "no write access");
     }
-    int ss_index = file->ss_index;
-    struct storage_server *ss = nm_get_server(&ctx->state, ss_index);
-    if (!ss || ss->ctrl_fd < 0) {
+    int ss_index = -1;
+    struct storage_server *ss = select_storage_server(ctx, file, &ss_index);
+    if (!ss) {
         return send_error_response(p->fd, ERR_UNAVAILABLE, "server offline");
     }
     char payload[256];
@@ -600,7 +649,18 @@ static int handle_client_delete(struct nm_context *ctx, struct peer *p, const ch
     if (!ok) {
         return send_error_response(p->fd, ERR_INTERNAL, "delete failed");
     }
+    int backup_index = file->backup_index;
     nm_remove_file(&ctx->state, file_name);
+    if (backup_index >= 0) {
+        struct storage_server *backup = nm_get_server(&ctx->state, backup_index);
+        if (backup && backup->ctrl_fd >= 0) {
+            char *backup_resp = NULL;
+            if (forward_command(backup, payload, &backup_resp) < 0) {
+                log_event(ctx, "BACKUP delete failed file=%s server=%d", file_name, backup_index);
+            }
+            free(backup_resp);
+        }
+    }
     nm_state_save(&ctx->state);
     log_request(ctx, "DELETE user=%s file=%s", p->user, file_name);
     return send_ok(p->fd, "\"op\":\"DELETE\"");
@@ -640,6 +700,65 @@ static int respond_with_endpoint(struct peer *p,
     return send_ok(p->fd, extra);
 }
 
+static struct storage_server *select_storage_server(struct nm_context *ctx,
+                                                   struct file_entry *file,
+                                                   int *server_index_out) {
+    if (!file) {
+        return NULL;
+    }
+    if (file->ss_index >= 0) {
+        struct storage_server *ss = nm_get_server(&ctx->state, file->ss_index);
+        if (ss && ss->ctrl_fd >= 0 && ss->online) {
+            if (server_index_out) {
+                *server_index_out = file->ss_index;
+            }
+            return ss;
+        }
+    }
+    if (file->backup_index >= 0) {
+        struct storage_server *backup = nm_get_server(&ctx->state, file->backup_index);
+        if (backup && backup->ctrl_fd >= 0 && backup->online) {
+            int prev = file->ss_index;
+            file->ss_index = file->backup_index;
+            file->backup_index = prev;
+            nm_state_save(&ctx->state);
+            log_event(ctx, "failover file=%s server=%s", file->name, backup->id);
+            if (server_index_out) {
+                *server_index_out = file->ss_index;
+            }
+            return backup;
+        }
+    }
+    return NULL;
+}
+
+static struct storage_server *select_storage_server_with_ticket(struct nm_context *ctx,
+                                                                struct file_entry *file,
+                                                                const char *user,
+                                                                const char *op,
+                                                                int *server_index_out,
+                                                                char *token_out) {
+    if (token_out) {
+        token_out[0] = '\0';
+    }
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        int ss_index = -1;
+        struct storage_server *ss = select_storage_server(ctx, file, &ss_index);
+        if (!ss) {
+            return NULL;
+        }
+        if (issue_ticket(ctx, ss, ss_index, file->name, user, op, token_out) == 0) {
+            if (server_index_out) {
+                *server_index_out = ss_index;
+            }
+            return ss;
+        }
+        nm_mark_server_down(&ctx->state, ss_index);
+        log_event(ctx, "ticket failure, retrying backup for file=%s", file->name);
+    }
+    return NULL;
+}
+
 static int handle_lookup_common(struct nm_context *ctx,
                                 struct peer *p,
                                 const char *json,
@@ -657,15 +776,16 @@ static int handle_lookup_common(struct nm_context *ctx,
     if (file_has_access(file, p->user, required_perm) != 0) {
         return send_error_response(p->fd, ERR_NOAUTH, "access denied");
     }
-    int ss_index = file->ss_index;
-    struct storage_server *ss = nm_get_server(&ctx->state, ss_index);
-    if (!ss || ss->ctrl_fd < 0) {
-        return send_error_response(p->fd, ERR_UNAVAILABLE, "server offline");
-    }
     char token[64];
-    if (issue_ticket(ctx, ss, ss_index, file->name, p->user, op, token) < 0) {
-        nm_mark_server_down(&ctx->state, ss_index);
-        return send_error_response(p->fd, ERR_UNAVAILABLE, "ticket failed");
+    int ss_index = -1;
+    struct storage_server *ss = select_storage_server_with_ticket(ctx,
+                                                                  file,
+                                                                  p->user,
+                                                                  op,
+                                                                  &ss_index,
+                                                                  token);
+    if (!ss) {
+        return send_error_response(p->fd, ERR_UNAVAILABLE, "server offline");
     }
     nm_cache_put(&ctx->state, file->name, ss_index);
     int sentence = -1;
@@ -750,9 +870,9 @@ static int handle_client_undo(struct nm_context *ctx, struct peer *p, const char
     if (file_has_access(file, p->user, NM_PERM_WRITE) != 0) {
         return send_error_response(p->fd, ERR_NOAUTH, "no write access");
     }
-    int ss_index = file->ss_index;
-    struct storage_server *ss = nm_get_server(&ctx->state, ss_index);
-    if (!ss || ss->ctrl_fd < 0) {
+    int ss_index = -1;
+    struct storage_server *ss = select_storage_server(ctx, file, &ss_index);
+    if (!ss) {
         return send_error_response(p->fd, ERR_UNAVAILABLE, "server offline");
     }
     char payload[512];
@@ -793,16 +913,16 @@ static int handle_client_exec(struct nm_context *ctx, struct peer *p, const char
     if (file_has_access(file, p->user, NM_PERM_READ) != 0) {
         return send_error_response(p->fd, ERR_NOAUTH, "no read access");
     }
-    int ss_index = file->ss_index;
-    struct storage_server *ss = nm_get_server(&ctx->state, ss_index);
-    if (!ss || ss->ctrl_fd < 0) {
-        return send_error_response(p->fd, ERR_UNAVAILABLE, "server offline");
-    }
-
     char token[64];
-    if (issue_ticket(ctx, ss, ss_index, file->name, p->user, "READ", token) < 0) {
-        nm_mark_server_down(&ctx->state, ss_index);
-        return send_error_response(p->fd, ERR_UNAVAILABLE, "ticket failed");
+    int ss_index = -1;
+    struct storage_server *ss = select_storage_server_with_ticket(ctx,
+                                                                  file,
+                                                                  p->user,
+                                                                  "READ",
+                                                                  &ss_index,
+                                                                  token);
+    if (!ss) {
+        return send_error_response(p->fd, ERR_UNAVAILABLE, "server offline");
     }
 
     char *content = NULL;
@@ -877,9 +997,73 @@ static int handle_client_message(struct nm_context *ctx, struct peer *p, const c
     return send_error_response(p->fd, ERR_BADREQ, "unsupported type");
 }
 
+static void replicate_file_to_backup(struct nm_context *ctx, struct file_entry *file) {
+    if (!file || file->backup_index < 0 || file->ss_index < 0 || file->backup_index == file->ss_index) {
+        return;
+    }
+    struct storage_server *primary = nm_get_server(&ctx->state, file->ss_index);
+    struct storage_server *backup = nm_get_server(&ctx->state, file->backup_index);
+    if (!primary || !backup) {
+        return;
+    }
+    if (primary->ctrl_fd < 0 || !primary->online || backup->ctrl_fd < 0 || !backup->online) {
+        return;
+    }
+
+    char ticket[64];
+    if (issue_ticket(ctx, primary, file->ss_index, file->name, file->owner, "READ", ticket) < 0) {
+        log_event(ctx, "BACKUP sync ticket failed file=%s", file->name);
+        return;
+    }
+
+    char *content = NULL;
+    if (ss_fetch_content(primary, file->name, file->owner, ticket, &content) < 0) {
+        log_event(ctx, "BACKUP fetch failed file=%s", file->name);
+        return;
+    }
+
+    char file_esc[NM_MAX_NAME * 2];
+    char owner_esc[NM_MAX_USER * 2];
+    char host_esc[256];
+    char port_esc[64];
+    char ticket_esc[64];
+    if (json_escape_string(file_esc, sizeof(file_esc), file->name) < 0 ||
+        json_escape_string(owner_esc, sizeof(owner_esc), file->owner) < 0 ||
+        json_escape_string(host_esc, sizeof(host_esc), primary->host) < 0 ||
+        json_escape_string(port_esc, sizeof(port_esc), primary->data_port) < 0 ||
+        json_escape_string(ticket_esc, sizeof(ticket_esc), ticket) < 0) {
+        free(content);
+        return;
+    }
+
+    char payload[MAX_JSON];
+    if (snprintf(payload, sizeof(payload),
+                 "{\"type\":\"NM_SYNC\",\"file\":\"%s\",\"owner\":\"%s\","
+                 "\"sourceHost\":\"%s\",\"sourcePort\":\"%s\",\"ticket\":\"%s\"}",
+                 file_esc, owner_esc, host_esc, port_esc, ticket_esc) >= (int)sizeof(payload)) {
+        free(content);
+        return;
+    }
+
+    char *response = NULL;
+    if (forward_command(backup, payload, &response) < 0) {
+        log_event(ctx, "BACKUP sync command failed file=%s server=%d", file->name, file->backup_index);
+    } else {
+        char status[16];
+        if (parse_status(response, status, sizeof(status), NULL, 0) == 0 &&
+            strcmp(status, "OK") == 0) {
+            log_event(ctx, "BACKUP sync succeeded file=%s server=%d", file->name, file->backup_index);
+        } else {
+            log_event(ctx, "BACKUP sync error file=%s server=%d status=%s",
+                      file->name, file->backup_index, status);
+        }
+    }
+    free(response);
+    free(content);
+}
+
 static void handle_ss_file_update(struct nm_context *ctx, const char *json) {
     char file_name[NM_MAX_NAME];
-    char owner[NM_MAX_USER];
     char last_user[NM_MAX_USER];
     if (json_get_string(json, "file", file_name, sizeof(file_name)) < 0) {
         return;
@@ -889,7 +1073,6 @@ static void handle_ss_file_update(struct nm_context *ctx, const char *json) {
     long modified = 0;
     long last_access = 0;
     int tmp = 0;
-    json_get_string(json, "owner", owner, sizeof(owner));
     json_get_string(json, "lastAccessUser", last_user, sizeof(last_user));
     if (json_get_int(json, "words", &tmp) == 0 && tmp >= 0) {
         words = (size_t)tmp;
@@ -903,6 +1086,11 @@ static void handle_ss_file_update(struct nm_context *ctx, const char *json) {
     if (json_get_int(json, "lastAccess", &tmp) == 0) {
         last_access = (long)tmp;
     }
+    struct file_entry *file = nm_find_file(&ctx->state, file_name);
+    if (!file) {
+        return;
+    }
+    time_t prev_modified = file->modified;
     nm_update_file_metadata(&ctx->state,
                             file_name,
                             words,
@@ -911,6 +1099,9 @@ static void handle_ss_file_update(struct nm_context *ctx, const char *json) {
                             (time_t)last_access,
                             last_user);
     nm_state_save(&ctx->state);
+    if (file->modified != prev_modified) {
+        replicate_file_to_backup(ctx, file);
+    }
 }
 
 static int handle_server_message(struct nm_context *ctx, const char *json) {
